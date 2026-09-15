@@ -38,6 +38,7 @@ let OLLAMA_URL = 'http://192.168.221.1:11434';
 let MODEL = 'qwen2.5-coder:7b';
 let THEME_NAME = 'claude';
 let MODE = 'ask';
+let PREVIEW_MODE = 'diff';
 let LAST_FILE = null;
 let ACTIVE_FILE = null;
 const HISTORY = [];
@@ -65,6 +66,12 @@ const MODES = {
   ask:  '生成后预览，按 y 确认才写入',
   auto: '生成后直接写入，不确认',
   yolo: '自动写入 + 允许运行命令',
+};
+
+const PREVIEW_MODES = {
+  diff: '只显示 diff（默认）',
+  both: '显示 diff + 完整文件',
+  off:  '不显示内容，直接确认',
 };
 
 const THEMES = {
@@ -107,9 +114,10 @@ const MENU = [
     { cmd: '/yolo', desc: '自动写入 + 允许运行' },
   ]},
   { name: '文件', items: [
-    { cmd: '/open',  desc: '锁定一个文件编辑' },
-    { cmd: '/close', desc: '退出文件编辑模式' },
-    { cmd: '/pwd',   desc: '显示当前文件完整路径' },
+    { cmd: '/open',    desc: '锁定一个文件编辑' },
+    { cmd: '/close',   desc: '退出文件编辑模式' },
+    { cmd: '/pwd',     desc: '显示当前文件完整路径' },
+    { cmd: '/preview', desc: '切换预览模式 (diff/both/off)' },
   ]},
   { name: '配置', items: [
     { cmd: '/conf',   desc: '查看/修改配置' },
@@ -172,6 +180,7 @@ function banner() {
     console.log(`  ${T.dim}file${C_RESET}      ${T.primary}${C_BOLD}${ACTIVE_FILE}${C_RESET}`);
   }
   console.log(`  ${T.dim}mode${C_RESET}      ${T.primary}${MODE}${C_RESET}  ${T.dim}· ${MODES[MODE]}${C_RESET}`);
+  console.log(`  ${T.dim}preview${C_RESET}   ${T.primary}${PREVIEW_MODE}${C_RESET}`);
   console.log(`  ${T.dim}theme${C_RESET}     ${T.primary}${T.name}${C_RESET}`);
   console.log();
   console.log(`  ${T.dim}输入 ${C_RESET}${T.primary}/${C_RESET}${T.dim} 弹菜单  ·  ${C_RESET}${T.primary}${T.star}${C_RESET}${T.dim} 直接说话  ·  ${C_RESET}${T.primary}/open${C_RESET}${T.dim} 锁定文件  ·  ${C_RESET}${T.primary}/models${C_RESET}${T.dim} 换模型${C_RESET}`);
@@ -400,7 +409,7 @@ async function doTest() {
   console.log();
 }
 
-// ── 通用选择器（模型 / 文件） ─────────────────────
+// ── 通用选择器 ────────────────────────────────────
 function pickItem(items, currentIdx, title) {
   return new Promise((resolve) => {
     let sel = currentIdx >= 0 ? currentIdx : 0;
@@ -633,12 +642,40 @@ function doPwd() {
   console.log();
 }
 
+function doPreview(args) {
+  console.log();
+  if (args.length === 0) {
+    console.log(`  ${T.primary}${T.star}${C_RESET} ${C_BOLD}预览模式${C_RESET}  ${T.user}${PREVIEW_MODE}${C_RESET}`);
+    dim(PREVIEW_MODES[PREVIEW_MODE] || '?');
+    console.log();
+    for (const k of Object.keys(PREVIEW_MODES)) {
+      const mark = k === PREVIEW_MODE ? `${T.primary}●${C_RESET}` : ' ';
+      console.log(`    ${mark} ${T.accent}${k}${C_RESET}  ${T.dim}${PREVIEW_MODES[k]}${C_RESET}`);
+    }
+    console.log();
+    return;
+  }
+  const m = args[0];
+  if (!PREVIEW_MODES[m]) {
+    err(`未知模式: ${m}`);
+    dim(`可选: ${Object.keys(PREVIEW_MODES).join('  ')}`);
+    console.log();
+    return;
+  }
+  PREVIEW_MODE = m;
+  persistConfig();
+  ok(`preview → ${m}`);
+  dim(PREVIEW_MODES[m]);
+  console.log();
+}
+
 function persistConfig() {
   config.provider = PROVIDER;
   config.ollama_url = OLLAMA_URL;
   config.model = MODEL;
   config.theme = THEME_NAME;
   config.mode = MODE;
+  config.preview = PREVIEW_MODE;
   return saveConfig(config);
 }
 
@@ -659,6 +696,7 @@ function doConf(args) {
     console.log(`  ${T.dim}url${C_RESET}       ${T.user}${OLLAMA_URL}${C_RESET}`);
     console.log(`  ${T.dim}theme${C_RESET}     ${T.primary}${T.name}${C_RESET}`);
     console.log(`  ${T.dim}mode${C_RESET}      ${T.primary}${MODE}${C_RESET}`);
+    console.log(`  ${T.dim}preview${C_RESET}   ${T.primary}${PREVIEW_MODE}${C_RESET}`);
     console.log(`  ${T.dim}root${C_RESET}      ${T.user}${relPath(ROOT)}${C_RESET}`);
     if (ACTIVE_FILE) console.log(`  ${T.dim}file${C_RESET}      ${T.primary}${ACTIVE_FILE}${C_RESET}`);
     console.log();
@@ -754,6 +792,7 @@ function doConf(args) {
     THEME_NAME = 'claude';
     T = THEMES.claude;
     MODE = 'ask';
+    PREVIEW_MODE = 'diff';
     ok('已恢复默认配置');
     console.log();
     return;
@@ -768,6 +807,105 @@ function clean(t) {
   return t.trim().replace(/^```[a-zA-Z0-9]*\s*\n/, '').replace(/\n```\s*$/, '').trim();
 }
 
+// ── 行级 diff ─────────────────────────────────────
+function simpleDiff(oldText, newText) {
+  const a = oldText.split('\n');
+  const b = newText.split('\n');
+  const n = a.length, m = b.length;
+
+  const dp = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      if (a[i] === b[j]) dp[i][j] = dp[i + 1][j + 1] + 1;
+      else dp[i][j] = Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+
+  const ops = [];
+  let i = 0, j = 0;
+  while (i < n && j < m) {
+    if (a[i] === b[j]) {
+      ops.push({ type: 'eq', line: a[i], aIdx: i + 1, bIdx: j + 1 });
+      i++; j++;
+    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+      ops.push({ type: 'del', line: a[i], aIdx: i + 1 });
+      i++;
+    } else {
+      ops.push({ type: 'add', line: b[j], bIdx: j + 1 });
+      j++;
+    }
+  }
+  while (i < n) { ops.push({ type: 'del', line: a[i], aIdx: i + 1 }); i++; }
+  while (j < m) { ops.push({ type: 'add', line: b[j], bIdx: j + 1 }); j++; }
+  return ops;
+}
+
+function renderDiff(oldText, newText, pathLabel) {
+  const ops = simpleDiff(oldText, newText);
+  const changed = ops.map((op) => op.type !== 'eq');
+  if (!changed.some(Boolean)) {
+    dim('无变化');
+    return { added: 0, deleted: 0 };
+  }
+
+  const CONTEXT = 3;
+  const show = new Array(ops.length).fill(false);
+  for (let i = 0; i < ops.length; i++) {
+    if (changed[i]) {
+      for (let k = Math.max(0, i - CONTEXT); k <= Math.min(ops.length - 1, i + CONTEXT); k++) {
+        show[k] = true;
+      }
+    }
+  }
+
+  const added = ops.filter((o) => o.type === 'add').length;
+  const deleted = ops.filter((o) => o.type === 'del').length;
+
+  const w = Math.min((process.stdout.columns || 80) - 8, 100);
+  const header = `diff ${pathLabel} +${added} -${deleted}`;
+  const headerPad = ' '.repeat(Math.max(0, w - displayWidth(header) - 6));
+  console.log(`  ${T.line}╭─ ${C_RESET}${T.primary}${C_BOLD}diff${C_RESET} ${T.dim}${pathLabel}${C_RESET} ${T.green}+${added}${C_RESET} ${T.red}-${deleted}${C_RESET} ${T.line}${'─'.repeat(Math.max(0, w - displayWidth(header) - 4))}╮${C_RESET}`);
+
+  const lineW = w - 12;
+  let prevShown = false;
+  for (let i = 0; i < ops.length; i++) {
+    if (!show[i]) {
+      if (prevShown) {
+        const pad = ' '.repeat(Math.max(0, w - 6));
+        console.log(`  ${T.line}│${C_RESET}  ${T.dim}⋯${C_RESET}${pad}${T.line}│${C_RESET}`);
+      }
+      prevShown = false;
+      continue;
+    }
+    prevShown = true;
+
+    const op = ops[i];
+    let marker, lineColor, num;
+    if (op.type === 'eq') {
+      marker = ' ';
+      lineColor = T.dim;
+      num = String(op.bIdx).padStart(4, ' ');
+    } else if (op.type === 'add') {
+      marker = `${T.green}+${C_RESET}`;
+      lineColor = T.green;
+      num = String(op.bIdx).padStart(4, ' ');
+    } else {
+      marker = `${T.red}-${C_RESET}`;
+      lineColor = T.red;
+      num = String(op.aIdx).padStart(4, ' ');
+    }
+
+    const raw = op.line === '' ? ' ' : op.line;
+    const display = raw.length > lineW ? raw.slice(0, lineW - 1) + '…' : raw;
+    const pad = ' '.repeat(Math.max(0, w - 6 - displayWidth(display) - 6));
+    console.log(`  ${T.line}│${C_RESET} ${marker} ${T.dim}${num}${C_RESET} ${lineColor}${display}${C_RESET}${pad}${T.line}│${C_RESET}`);
+  }
+
+  console.log(`  ${T.line}╰${'─'.repeat(w - 2)}╯${C_RESET}`);
+  return { added, deleted };
+}
+
+// ── 路径 ──────────────────────────────────────────
 function safePath(p) {
   if (!p) return null;
   const full = path.isAbsolute(p) ? path.normalize(p) : path.resolve(ROOT, p);
@@ -787,6 +925,7 @@ function backup(fp) {
   }
 }
 
+// ── 意图识别 ──────────────────────────────────────
 function extractFile(text) {
   let m = text.match(/([\w\-/]+\.(py|txt|json|md|yaml|yml|toml|cfg|ini|js|ts|go|rs|java))/);
   if (m) return m[1];
@@ -824,6 +963,7 @@ function detectIntent(text) {
 }
 const wantsOverwrite = (t) => /(覆盖|重写|替换整个)/.test(t);
 
+// ── 动作 ──────────────────────────────────────────
 async function doChat(text) {
   userLine(text);
   HISTORY.push({ role: 'user', content: text });
@@ -911,8 +1051,10 @@ async function doWrite(text, action) {
   if (action === 'edit') {
     const old = fs.readFileSync(full, 'utf8');
     prompt = `以下是 ${relPath(full)} 的现有代码:\n\n${old}\n\n用户要求: ${text}\n\n输出修改后的完整代码。保留所有未被要求修改的部分。不要解释，不要 markdown。`;
+    console.log();
     info(`改 ${relPath(full)}…`);
   } else {
+    console.log();
     info(`${action === 'append' ? '追加到' : '新建'} ${relPath(full)}…`);
     prompt = text;
   }
@@ -929,15 +1071,46 @@ async function doWrite(text, action) {
   const dt = ((Date.now() - t0) / 1000).toFixed(1);
   process.stdout.write('\r' + ' '.repeat(30) + '\r');
   if (!newCode) { err('模型没返回'); return; }
+
   let final;
   if (action === 'append' && exists) {
     const old = fs.readFileSync(full, 'utf8');
     final = old.replace(/\s*$/, '') + '\n\n' + newCode + '\n';
   } else final = newCode + '\n';
+
   console.log();
-  boxed(newCode, T.assistant);
   dim(`${dt}s · ${newCode.length} 字符`);
   console.log();
+
+  if (action === 'edit' && exists) {
+    const old = fs.readFileSync(full, 'utf8');
+
+    if (PREVIEW_MODE === 'off') {
+      dim(`预览已关闭，${relPath(full)} 即将被覆盖`);
+      console.log();
+    } else {
+      const { added, deleted } = renderDiff(old, final, relPath(full));
+      if (added === 0 && deleted === 0) {
+        dim('模型返回内容与原文一致，无改动');
+        console.log();
+        return;
+      }
+      if (PREVIEW_MODE === 'both') {
+        console.log();
+        boxed(newCode, T.assistant);
+        console.log();
+      }
+    }
+  } else {
+    if (PREVIEW_MODE !== 'off') {
+      boxed(newCode, T.assistant);
+      console.log();
+    } else {
+      dim(`预览已关闭，${relPath(full)} 即将被写入`);
+      console.log();
+    }
+  }
+
   if (MODE === 'sec') { warn('sec 模式：仅显示，不写入'); LAST_FILE = relPath(full); return; }
   if (MODE === 'ask') {
     const verb = { new: '写入', append: '追加到', overwrite: '覆盖', edit: '更新' }[action];
@@ -950,6 +1123,7 @@ async function doWrite(text, action) {
   LAST_FILE = relPath(full);
 }
 
+// ── 参数候选 ──────────────────────────────────────
 function getArgCandidates(buf) {
   let m = buf.match(/^\/theme\s+(\S*)$/);
   if (m) {
@@ -965,6 +1139,14 @@ function getArgCandidates(buf) {
     const items = Object.keys(MODES)
       .filter((n) => n.startsWith(prefix))
       .map((n) => ({ cmd: n, desc: MODES[n], isArg: true }));
+    return { items, prefix };
+  }
+  m = buf.match(/^\/preview\s+(\S*)$/);
+  if (m) {
+    const prefix = m[1];
+    const items = Object.keys(PREVIEW_MODES)
+      .filter((n) => n.startsWith(prefix))
+      .map((n) => ({ cmd: n, desc: PREVIEW_MODES[n], isArg: true }));
     return { items, prefix };
   }
   m = buf.match(/^\/conf\s+theme\s+(\S*)$/);
@@ -1009,9 +1191,11 @@ function getArgCandidates(buf) {
   return null;
 }
 
+// ── 输入 ──────────────────────────────────────────
 function readLine(prompt, menu) {
   return new Promise((resolve, reject) => {
     let buf = '';
+    let cursor = 0;
     let catIdx = 0, sel = 0;
     let menuVisible = !!menu;
     let flatItems = [];
@@ -1074,8 +1258,13 @@ function readLine(prompt, menu) {
     function render() {
       const cols = process.stdout.columns || 80;
       const inputText = prompt + buf;
-      const inputW = displayWidth(inputText);
-      const inputLines = Math.max(1, Math.ceil(inputW / cols));
+      const cursorText = prompt + buf.slice(0, cursor);
+      const cursorCol = displayWidth(cursorText);
+      let cursorRow = Math.floor(cursorCol / cols);
+      let colInRow = cursorCol - cursorRow * cols;
+
+      const inputCols = displayWidth(inputText);
+      const inputLines = Math.max(1, Math.ceil(inputCols / cols));
 
       const rows = buildRows();
       let maxW = 0;
@@ -1108,7 +1297,13 @@ function readLine(prompt, menu) {
         menuLines = rows.length + 2;
       }
 
-      lastRenderLines = (inputLines - 1) + menuLines;
+      // 从屏幕末尾回到光标应在的位置
+      const linesUp = menuLines + (inputLines - 1 - cursorRow);
+      if (linesUp > 0) out += `\x1b[${linesUp}A`;
+      out += '\r';
+      if (colInRow > 0) out += `\x1b[${colInRow}C`;
+
+      lastRenderLines = cursorRow;
       process.stdout.write(out);
     }
 
@@ -1139,16 +1334,20 @@ function readLine(prompt, menu) {
       return filtering ? flatItems[sel] : menu[catIdx].items[sel];
     }
     function completeFilename() {
-      const lastSpace = buf.lastIndexOf(' ');
-      const prefix = lastSpace >= 0 ? buf.slice(lastSpace + 1) : buf;
-      const head = lastSpace >= 0 ? buf.slice(0, lastSpace + 1) : '';
+      const before = buf.slice(0, cursor);
+      const after = buf.slice(cursor);
+      const lastSpace = before.lastIndexOf(' ');
+      const prefix = lastSpace >= 0 ? before.slice(lastSpace + 1) : before;
+      const head = lastSpace >= 0 ? before.slice(0, lastSpace + 1) : '';
       let names = [];
       try { names = fs.readdirSync(ROOT).sort(); } catch (e) { /* */ }
       const matches = names.filter((n) => n.startsWith(prefix));
       if (matches.length === 1) {
         const full = path.join(ROOT, matches[0]);
         const suffix = fs.statSync(full).isDirectory() ? '/' : '';
-        buf = head + matches[0] + suffix;
+        const inserted = matches[0] + suffix;
+        buf = head + inserted + after;
+        cursor = (head + inserted).length;
         render();
         return true;
       } else if (matches.length > 1) {
@@ -1158,7 +1357,12 @@ function readLine(prompt, menu) {
           while (i < common.length && i < m.length && common[i] === m[i]) i++;
           common = common.slice(0, i);
         }
-        if (common.length > prefix.length) { buf = head + common; render(); return true; }
+        if (common.length > prefix.length) {
+          buf = head + common + after;
+          cursor = (head + common).length;
+          render();
+          return true;
+        }
       }
       return false;
     }
@@ -1166,45 +1370,77 @@ function readLine(prompt, menu) {
     function onKey(str, key) {
       if (key.ctrl && key.name === 'c') return abort('SIGINT');
       if (key.ctrl && key.name === 'd') { if (buf === '') return abort('EOF'); }
+      if (key.ctrl && key.name === 'a') { cursor = 0; render(); return; }
+      if (key.ctrl && key.name === 'e') { cursor = buf.length; render(); return; }
 
       if (key.name === 'return' || key.name === 'enter') {
         if (menuVisible) {
           const it = currentItem();
           if (it) {
-            if (it.isArg) buf = buf.replace(/\S*$/, it.cmd);
-            else buf = it.cmd;
+            if (it.isArg) {
+              buf = buf.replace(/\S*$/, it.cmd);
+              cursor = buf.length;
+            } else {
+              buf = it.cmd;
+              cursor = buf.length;
+            }
           }
         }
         return finish(buf);
       }
       if (key.name === 'backspace') {
-        if (buf.length > 0) { buf = buf.slice(0, -1); refreshMenu(); render(); }
+        if (cursor > 0) {
+          buf = buf.slice(0, cursor - 1) + buf.slice(cursor);
+          cursor--;
+          refreshMenu();
+          render();
+        }
         return;
       }
-      if (key.name === 'up') {
-        if (!menuVisible) return;
-        const len = filtering ? flatItems.length : menu[catIdx].items.length;
-        sel = (sel - 1 + len) % len;
-        render(); return;
-      }
-      if (key.name === 'down') {
-        if (!menuVisible) return;
-        const len = filtering ? flatItems.length : menu[catIdx].items.length;
-        sel = (sel + 1) % len;
-        render(); return;
+      if (key.name === 'delete') {
+        if (cursor < buf.length) {
+          buf = buf.slice(0, cursor) + buf.slice(cursor + 1);
+          refreshMenu();
+          render();
+        }
+        return;
       }
       if (key.name === 'left') {
         if (menuVisible && !filtering) {
           catIdx = (catIdx - 1 + menu.length) % menu.length;
-          sel = 0; render();
+          sel = 0;
+          render();
+        } else if (cursor > 0) {
+          cursor--;
+          render();
         }
         return;
       }
       if (key.name === 'right') {
         if (menuVisible && !filtering) {
           catIdx = (catIdx + 1) % menu.length;
-          sel = 0; render();
+          sel = 0;
+          render();
+        } else if (cursor < buf.length) {
+          cursor++;
+          render();
         }
+        return;
+      }
+      if (key.name === 'home') { cursor = 0; render(); return; }
+      if (key.name === 'end') { cursor = buf.length; render(); return; }
+      if (key.name === 'up') {
+        if (!menuVisible) return;
+        const len = filtering ? flatItems.length : menu[catIdx].items.length;
+        sel = (sel - 1 + len) % len;
+        render();
+        return;
+      }
+      if (key.name === 'down') {
+        if (!menuVisible) return;
+        const len = filtering ? flatItems.length : menu[catIdx].items.length;
+        sel = (sel + 1) % len;
+        render();
         return;
       }
       if (key.name === 'escape') {
@@ -1217,13 +1453,17 @@ function readLine(prompt, menu) {
           if (it) {
             if (it.isArg) {
               buf = buf.replace(/\S*$/, it.cmd);
-              if (flatItems.length === 1) buf += ' ';
-              refreshMenu(); render();
+              cursor = buf.length;
+              if (flatItems.length === 1) { buf += ' '; cursor++; }
+              refreshMenu();
+              render();
             } else {
               buf = it.cmd;
+              cursor = buf.length;
               const len = filtering ? flatItems.length : menu[catIdx].items.length;
-              if (len === 1) buf += ' ';
-              refreshMenu(); render();
+              if (len === 1) { buf += ' '; cursor++; }
+              refreshMenu();
+              render();
             }
           }
         } else {
@@ -1235,7 +1475,12 @@ function readLine(prompt, menu) {
         const pr = str.replace(/[\r\n]/g, ' ');
         let has = false;
         for (const ch of pr) if (ch.charCodeAt(0) >= 32) has = true;
-        if (has) { buf += pr; refreshMenu(); render(); }
+        if (has) {
+          buf = buf.slice(0, cursor) + pr + buf.slice(cursor);
+          cursor += pr.length;
+          refreshMenu();
+          render();
+        }
       }
     }
 
@@ -1248,6 +1493,7 @@ function readLine(prompt, menu) {
   });
 }
 
+// ── 帮助 ──────────────────────────────────────────
 function helpText() {
   console.log();
   console.log(`  ${C_BOLD}${T.primary}直接说话${C_RESET} ${T.dim}（自动判断意图）${C_RESET}`);
@@ -1258,10 +1504,11 @@ function helpText() {
   console.log(`    ${T.dim}跑一下${C_RESET}`);
   console.log();
   console.log(`  ${C_BOLD}${T.primary}文件编辑模式${C_RESET}`);
-  console.log(`    ${T.accent}/open${C_RESET}  ${T.dim}<文件>${C_RESET}   ${T.dim}锁定文件，之后写入/编辑默认它${C_RESET}`);
-  console.log(`    ${T.accent}/open${C_RESET}          ${T.dim}不带参数则弹出列表选${C_RESET}`);
-  console.log(`    ${T.accent}/close${C_RESET}         ${T.dim}退出文件编辑模式${C_RESET}`);
-  console.log(`    ${T.accent}/pwd${C_RESET}           ${T.dim}显示当前文件完整路径${C_RESET}`);
+  console.log(`    ${T.accent}/open${C_RESET}    ${T.dim}<文件>${C_RESET}     ${T.dim}锁定文件，之后默认操作它${C_RESET}`);
+  console.log(`    ${T.accent}/open${C_RESET}              ${T.dim}不带参数弹出列表选${C_RESET}`);
+  console.log(`    ${T.accent}/close${C_RESET}             ${T.dim}退出文件编辑模式${C_RESET}`);
+  console.log(`    ${T.accent}/pwd${C_RESET}               ${T.dim}显示当前文件完整路径${C_RESET}`);
+  console.log(`    ${T.accent}/preview${C_RESET}           ${T.dim}预览模式 diff / both / off${C_RESET}`);
   console.log();
   console.log(`  ${C_BOLD}${T.primary}模式${C_RESET}`);
   console.log(`    ${T.accent}/chat${C_RESET}   ${T.dim}纯聊天${C_RESET}`);
@@ -1296,6 +1543,7 @@ function showMode() {
   if (MODE === 'sec') info('只显示代码，不会写入任何文件');
 }
 
+// ── 主入口 ────────────────────────────────────────
 async function main() {
   const args = process.argv.slice(2);
   let rootArg = null;
@@ -1332,10 +1580,12 @@ async function main() {
   MODEL = process.env.OLLAMA_MODEL || config.model || 'qwen2.5-coder:7b';
   THEME_NAME = process.env.WHALE_THEME || config.theme || 'claude';
   MODE = config.mode || 'ask';
+  PREVIEW_MODE = config.preview || 'diff';
 
   if (cliTheme && THEMES[cliTheme]) THEME_NAME = cliTheme;
   if (cliMode && MODES[cliMode]) MODE = cliMode;
   if (!(MODE in MODES)) MODE = 'ask';
+  if (!(PREVIEW_MODE in PREVIEW_MODES)) PREVIEW_MODE = 'diff';
   T = THEMES[THEME_NAME] || THEMES.claude;
 
   banner();
@@ -1368,6 +1618,7 @@ async function main() {
       if (cmd === 'open')  { await doOpenFile(rest); continue; }
       if (cmd === 'close') { doCloseFile(); continue; }
       if (cmd === 'pwd')   { doPwd(); continue; }
+      if (cmd === 'preview') { doPreview(rest); continue; }
       if (cmd === 'conf') { doConf(rest); continue; }
       if (cmd === 'theme') {
         if (rest.length === 0) {
