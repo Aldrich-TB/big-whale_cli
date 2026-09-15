@@ -9,7 +9,7 @@ const https = require('https');
 const { spawn } = require('child_process');
 const readline = require('readline');
 
-// ── 配置路径（延迟到 ROOT 确定后） ────────────────
+// ── 配置路径 ──────────────────────────────────────
 let ROOT = null;
 
 function getConfigPath() {
@@ -33,12 +33,31 @@ function saveConfig(cfg) {
 
 // ── 全局状态 ──────────────────────────────────────
 let config = {};
-let OLLAMA_URL = 'http://192.168.1.1:11434';
+let PROVIDER = 'ollama';       // 'ollama' | 'lmstudio'
+let OLLAMA_URL = 'http://192.168.221.1:11434';
 let MODEL = 'qwen2.5-coder:7b';
 let THEME_NAME = 'claude';
 let MODE = 'ask';
 let LAST_FILE = null;
 const HISTORY = [];
+
+// provider 默认值
+const PROVIDERS = {
+  ollama: {
+    name: 'Ollama',
+    defaultUrl: 'http://192.168.221.1:11434',
+    port: 11434,
+    apiType: 'ollama',   // 原生 API
+    hint: 'URL 末尾不带 /v1',
+  },
+  lmstudio: {
+    name: 'LM Studio',
+    defaultUrl: 'http://192.168.221.1:1234/v1',
+    port: 1234,
+    apiType: 'openai',   // OpenAI 兼容
+    hint: 'URL 末尾带 /v1',
+  },
+};
 
 const MODES = {
   chat: '纯聊天，不生成代码，不碰文件',
@@ -95,7 +114,7 @@ const MENU = [
     { cmd: '/files', desc: '列出当前目录文件' },
     { cmd: '/root',  desc: '显示工作目录' },
     { cmd: '/mode',  desc: '显示当前模式' },
-    { cmd: '/test',  desc: '检测 Ollama 连接（5s 超时）' },
+    { cmd: '/test',  desc: '检测服务连接（5s 超时）' },
   ]},
   { name: '其他', items: [
     { cmd: '/clear', desc: '清空对话历史' },
@@ -138,10 +157,13 @@ function banner() {
   console.log();
   console.log(`  ${T.primary}${C_BOLD}${T.star}${C_RESET} ${C_BOLD}whale${C_RESET} ${T.dim}· 本地代码小助手${C_RESET}`);
   console.log();
-  console.log(`  ${T.dim}model${C_RESET}  ${T.user}${MODEL}${C_RESET}`);
-  console.log(`  ${T.dim}cwd  ${C_RESET}  ${T.user}${relPath(ROOT)}${C_RESET}  ${T.dim}(locked)${C_RESET}`);
-  console.log(`  ${T.dim}mode ${C_RESET}  ${T.primary}${MODE}${C_RESET}  ${T.dim}· ${MODES[MODE]}${C_RESET}`);
-  console.log(`  ${T.dim}theme${C_RESET}  ${T.primary}${T.name}${C_RESET}`);
+  const p = PROVIDERS[PROVIDER] || PROVIDERS.ollama;
+  console.log(`  ${T.dim}provider${C_RESET}  ${T.primary}${p.name}${C_RESET}`);
+  console.log(`  ${T.dim}model${C_RESET}     ${T.user}${MODEL}${C_RESET}`);
+  console.log(`  ${T.dim}url${C_RESET}       ${T.user}${OLLAMA_URL}${C_RESET}`);
+  console.log(`  ${T.dim}cwd${C_RESET}       ${T.user}${relPath(ROOT)}${C_RESET}  ${T.dim}(locked)${C_RESET}`);
+  console.log(`  ${T.dim}mode${C_RESET}      ${T.primary}${MODE}${C_RESET}  ${T.dim}· ${MODES[MODE]}${C_RESET}`);
+  console.log(`  ${T.dim}theme${C_RESET}     ${T.primary}${T.name}${C_RESET}`);
   console.log();
   console.log(`  ${T.dim}输入 ${C_RESET}${T.primary}/${C_RESET}${T.dim} 弹菜单  ·  ${C_RESET}${T.primary}${T.star}${C_RESET}${T.dim} 直接说话  ·  ${C_RESET}${T.primary}/conf${C_RESET}${T.dim} 配置  ·  ${C_RESET}${T.primary}/test${C_RESET}${T.dim} 测连接${C_RESET}`);
   console.log();
@@ -195,11 +217,38 @@ function confirm(prompt = '继续?') {
   });
 }
 
-// ── Ollama ────────────────────────────────────────
+// ── API 类型判断 ──────────────────────────────────
+function detectApiType(url) {
+  const p = PROVIDERS[PROVIDER];
+  if (p && p.apiType) return p.apiType;
+  return /\/v1\/?$/.test(url) ? 'openai' : 'ollama';
+}
+
+// ── API 调用 ──────────────────────────────────────
 function askOllama(messages, temperature = 0.1) {
   return new Promise((resolve, reject) => {
-    const url = new URL('/api/chat', OLLAMA_URL);
-    const body = JSON.stringify({ model: MODEL, messages, stream: false, options: { temperature } });
+    const apiType = detectApiType(OLLAMA_URL);
+    let url, body, parseResp;
+
+    if (apiType === 'openai') {
+      const base = OLLAMA_URL.replace(/\/+$/, '');
+      url = new URL(base + '/chat/completions');
+      body = JSON.stringify({ model: MODEL, messages, temperature, stream: false });
+      parseResp = (p) => {
+        if (p.error) throw new Error(p.error.message || JSON.stringify(p.error));
+        return p.choices?.[0]?.message?.content ?? '';
+      };
+    } else {
+      url = new URL('/api/chat', OLLAMA_URL);
+      body = JSON.stringify({
+        model: MODEL, messages, stream: false, options: { temperature },
+      });
+      parseResp = (p) => {
+        if (p.error) throw new Error(p.error);
+        return p.message.content;
+      };
+    }
+
     const mod = url.protocol === 'https:' ? https : http;
     const req = mod.request({
       hostname: url.hostname,
@@ -213,8 +262,7 @@ function askOllama(messages, temperature = 0.1) {
       res.on('end', () => {
         try {
           const p = JSON.parse(data);
-          if (p.error) reject(new Error(p.error));
-          else resolve(p.message.content);
+          resolve(parseResp(p));
         } catch (e) { reject(e); }
       });
     });
@@ -229,11 +277,19 @@ const SYS_CHAT = 'You are a concise coding assistant. Reply in the same language
 const genCode = (p) => askOllama([{ role: 'system', content: SYS_CODE }, { role: 'user', content: p }]);
 const chatLLM = (m) => askOllama([{ role: 'system', content: SYS_CHAT }, ...m], 0.6);
 
+// ── 连接检测 ──────────────────────────────────────
 function checkConnection(timeoutMs = 5000) {
   return new Promise((resolve) => {
+    const apiType = detectApiType(OLLAMA_URL);
     let url;
-    try { url = new URL('/api/tags', OLLAMA_URL); }
-    catch (e) { return resolve({ ok: false, error: 'URL 无效: ' + OLLAMA_URL }); }
+    try {
+      if (apiType === 'openai') {
+        const base = OLLAMA_URL.replace(/\/+$/, '');
+        url = new URL(base + '/models');
+      } else {
+        url = new URL('/api/tags', OLLAMA_URL);
+      }
+    } catch (e) { return resolve({ ok: false, error: 'URL 无效: ' + OLLAMA_URL }); }
 
     const mod = url.protocol === 'https:' ? https : http;
     const t0 = Date.now();
@@ -248,11 +304,16 @@ function checkConnection(timeoutMs = 5000) {
         const elapsed = Date.now() - t0;
         try {
           const p = JSON.parse(data);
-          const models = (p.models || []).map((m) => m.name);
+          let models;
+          if (apiType === 'openai') {
+            models = (p.data || []).map((m) => m.id);
+          } else {
+            models = (p.models || []).map((m) => m.name);
+          }
           const hasModel = models.some((n) =>
             n === MODEL || n === MODEL + ':latest' || n.startsWith(MODEL + ':')
           );
-          resolve({ ok: true, models, hasModel, elapsed });
+          resolve({ ok: true, models, hasModel, elapsed, apiType });
         } catch (e) {
           resolve({ ok: false, error: '响应不是有效 JSON', elapsed });
         }
@@ -269,20 +330,24 @@ function checkConnection(timeoutMs = 5000) {
 
 async function doTest() {
   console.log();
-  process.stdout.write(`  ${T.primary}${T.star}${C_RESET} ${T.dim}检测 Ollama…${C_RESET}`);
+  process.stdout.write(`  ${T.primary}${T.star}${C_RESET} ${T.dim}检测中…${C_RESET}`);
   const r = await checkConnection(5000);
   process.stdout.write('\r' + ' '.repeat(40) + '\r');
 
-  console.log(`  ${T.dim}URL${C_RESET}     ${T.user}${OLLAMA_URL}${C_RESET}`);
-  console.log(`  ${T.dim}模型${C_RESET}    ${T.user}${MODEL}${C_RESET}`);
-  console.log(`  ${T.dim}耗时${C_RESET}    ${r.elapsed}ms`);
+  const p = PROVIDERS[PROVIDER] || PROVIDERS.ollama;
+  const apiLabel = r.apiType === 'openai' ? 'OpenAI 兼容' : 'Ollama 原生';
+  console.log(`  ${T.dim}provider${C_RESET}  ${T.primary}${p.name}${C_RESET}`);
+  console.log(`  ${T.dim}URL${C_RESET}       ${T.user}${OLLAMA_URL}${C_RESET}`);
+  console.log(`  ${T.dim}接口${C_RESET}      ${T.user}${apiLabel}${C_RESET}`);
+  console.log(`  ${T.dim}模型${C_RESET}      ${T.user}${MODEL}${C_RESET}`);
+  console.log(`  ${T.dim}耗时${C_RESET}      ${r.elapsed}ms`);
   console.log();
 
   if (r.ok && r.hasModel) {
     console.log(`  ${T.green}${T.star}${C_RESET} ${C_BOLD}连接正常${C_RESET}  ·  ${T.dim}模型就绪${C_RESET}`);
     console.log();
     if (r.models.length > 0) {
-      console.log(`  ${T.dim}本地已下载 ${r.models.length} 个模型:${C_RESET}`);
+      console.log(`  ${T.dim}可用模型 ${r.models.length} 个:${C_RESET}`);
       for (const m of r.models) {
         const mark = (m === MODEL || m.startsWith(MODEL + ':')) ? `${T.primary}●${C_RESET}` : ` `;
         console.log(`    ${mark} ${m}`);
@@ -292,50 +357,50 @@ async function doTest() {
     return;
   }
   if (r.ok && !r.hasModel) {
-    console.log(`  ${T.yellow}!${C_RESET} ${C_BOLD}Ollama 已连接，但没有目标模型${C_RESET}`);
+    console.log(`  ${T.yellow}!${C_RESET} ${C_BOLD}服务已连接，但没有目标模型${C_RESET}`);
     console.log();
     if (r.models.length > 0) {
-      console.log(`  ${T.dim}本地已有:${C_RESET}`);
+      console.log(`  ${T.dim}可用模型:${C_RESET}`);
       for (const m of r.models) console.log(`    ${T.dim}·${C_RESET} ${m}`);
     } else {
-      console.log(`  ${T.dim}本地还没有任何模型${C_RESET}`);
+      console.log(`  ${T.dim}还没有加载任何模型${C_RESET}`);
     }
     console.log();
-    console.log(`  ${T.dim}下载:${C_RESET}  ${T.primary}ollama pull ${MODEL}${C_RESET}`);
     console.log(`  ${T.dim}改模型:${C_RESET} ${T.primary}/conf model <名称>${C_RESET}`);
     console.log();
     return;
   }
-  console.log(`  ${T.red}✗${C_RESET} ${C_BOLD}无法连接 Ollama${C_RESET}`);
+
+  console.log(`  ${T.red}✗${C_RESET} ${C_BOLD}无法连接${C_RESET}`);
   console.log(`  ${T.dim}原因:${C_RESET} ${r.error}`);
   console.log();
   console.log(`  ${C_BOLD}${T.primary}排查${C_RESET}`);
   console.log();
-  console.log(`  ${T.primary}1.${C_RESET} Ollama 是否在运行？`);
-  console.log(`  ${T.primary}2.${C_RESET} 是否监听 ${T.accent}0.0.0.0${C_RESET}？`);
-  console.log(`     ${T.accent}netstat -ano | findstr :11434${C_RESET} ${T.dim}(Win)${C_RESET}`);
-  console.log(`     ${T.accent}ss -tlnp | grep 11434${C_RESET} ${T.dim}(Linux)${C_RESET}`);
-  console.log(`  ${T.primary}3.${C_RESET} 临时改监听地址:`);
+  console.log(`  ${T.primary}1.${C_RESET} 服务是否在运行？`);
   console.log();
-  console.log(`     ${C_BOLD}Windows${C_RESET} ${T.dim}(管理员 PowerShell)${C_RESET}`);
-  console.log(`       ${T.accent}Get-Process ollama* -EA SilentlyContinue | Stop-Process -Force${C_RESET}`);
-  console.log(`       ${T.accent}$env:OLLAMA_HOST="0.0.0.0:11434"${C_RESET}`);
-  console.log(`       ${T.accent}ollama serve${C_RESET}`);
+  console.log(`  ${T.primary}2.${C_RESET} URL 格式对不对？`);
+  console.log(`     ${T.dim}Ollama:${C_RESET}     ${T.accent}http://<主机>:11434${C_RESET} ${T.dim}(末尾不带 /v1)${C_RESET}`);
+  console.log(`     ${T.dim}LM Studio:${C_RESET}  ${T.accent}http://<主机>:1234/v1${C_RESET} ${T.dim}(末尾带 /v1)${C_RESET}`);
   console.log();
-  console.log(`     ${C_BOLD}Linux / macOS${C_RESET}`);
-  console.log(`       ${T.accent}OLLAMA_HOST=0.0.0.0 ollama serve${C_RESET}`);
+  console.log(`  ${T.primary}3.${C_RESET} 是否监听 ${T.accent}0.0.0.0${C_RESET}？`);
+  console.log(`     ${T.dim}Ollama (Win):${C_RESET} ${T.accent}$env:OLLAMA_HOST="0.0.0.0:11434"; ollama serve${C_RESET}`);
+  console.log(`     ${T.dim}LM Studio:${C_RESET} ${T.accent}Developer -> Server -> Serve on Local Network${C_RESET}`);
   console.log();
-  console.log(`  ${T.primary}4.${C_RESET} 防火墙放行 ${T.accent}11434${C_RESET}`);
-  console.log(`     ${T.dim}Win:${C_RESET} ${T.accent}New-NetFirewallRule -DisplayName "Ollama" -Direction Inbound -Protocol TCP -LocalPort 11434 -Action Allow${C_RESET}`);
-  console.log(`     ${T.dim}Linux:${C_RESET} ${T.accent}sudo ufw allow 11434/tcp${C_RESET}`);
+  console.log(`  ${T.primary}4.${C_RESET} 防火墙放行端口 ${T.accent}${p.port}${C_RESET}`);
   console.log();
-  console.log(`  ${T.primary}5.${C_RESET} 手动验证: ${T.accent}curl ${OLLAMA_URL}/api/tags${C_RESET}`);
+  console.log(`  ${T.primary}5.${C_RESET} 手动验证:`);
+  if (r.apiType === 'openai') {
+    console.log(`     ${T.accent}curl ${OLLAMA_URL}/models${C_RESET}`);
+  } else {
+    console.log(`     ${T.accent}curl ${OLLAMA_URL}/api/tags${C_RESET}`);
+  }
   console.log();
-  console.log(`  ${T.dim}改 URL:${C_RESET} ${T.primary}/conf url <地址>${C_RESET}`);
+  console.log(`  ${T.dim}切换 provider:${C_RESET} ${T.primary}/conf provider ollama${C_RESET}  ${T.dim}或${C_RESET}  ${T.primary}/conf provider lmstudio${C_RESET}`);
   console.log();
 }
 
 function persistConfig() {
+  config.provider = PROVIDER;
   config.ollama_url = OLLAMA_URL;
   config.model = MODEL;
   config.theme = THEME_NAME;
@@ -343,11 +408,20 @@ function persistConfig() {
   return saveConfig(config);
 }
 
+// 切换 provider 时自动套用默认 URL
+function switchProvider(name) {
+  const p = PROVIDERS[name];
+  PROVIDER = name;
+  OLLAMA_URL = p.defaultUrl;
+}
+
 function doConf(args) {
   console.log();
   if (args.length === 0) {
+    const p = PROVIDERS[PROVIDER] || PROVIDERS.ollama;
     console.log(`  ${C_BOLD}${T.primary}当前配置${C_RESET}`);
     console.log();
+    console.log(`  ${T.dim}provider${C_RESET}  ${T.primary}${p.name}${C_RESET}`);
     console.log(`  ${T.dim}model${C_RESET}     ${T.user}${MODEL}${C_RESET}`);
     console.log(`  ${T.dim}url${C_RESET}       ${T.user}${OLLAMA_URL}${C_RESET}`);
     console.log(`  ${T.dim}theme${C_RESET}     ${T.primary}${T.name}${C_RESET}`);
@@ -357,17 +431,41 @@ function doConf(args) {
     console.log(`  ${T.dim}配置文件${C_RESET}  ${T.accent}${getConfigPath()}${C_RESET}`);
     console.log();
     console.log(`  ${C_BOLD}${T.primary}修改${C_RESET}`);
-    console.log(`    ${T.accent}/conf model${C_RESET} ${T.dim}<名称>${C_RESET}      ${T.dim}切换模型${C_RESET}`);
-    console.log(`    ${T.accent}/conf url${C_RESET}   ${T.dim}<地址>${C_RESET}      ${T.dim}Ollama 地址${C_RESET}`);
-    console.log(`    ${T.accent}/conf theme${C_RESET} ${T.dim}<名称>${C_RESET}      ${T.dim}主题${C_RESET}`);
-    console.log(`    ${T.accent}/conf mode${C_RESET}  ${T.dim}<名称>${C_RESET}      ${T.dim}默认模式${C_RESET}`);
-    console.log(`    ${T.accent}/conf reset${C_RESET}               ${T.dim}恢复默认${C_RESET}`);
+    console.log(`    ${T.accent}/conf provider${C_RESET} ${T.dim}<ollama|lmstudio>${C_RESET}   ${T.dim}切换服务${C_RESET}`);
+    console.log(`    ${T.accent}/conf model${C_RESET}    ${T.dim}<名称>${C_RESET}           ${T.dim}切换模型${C_RESET}`);
+    console.log(`    ${T.accent}/conf url${C_RESET}      ${T.dim}<地址>${C_RESET}           ${T.dim}自定义地址${C_RESET}`);
+    console.log(`    ${T.accent}/conf theme${C_RESET}    ${T.dim}<名称>${C_RESET}           ${T.dim}主题${C_RESET}`);
+    console.log(`    ${T.accent}/conf mode${C_RESET}     ${T.dim}<名称>${C_RESET}           ${T.dim}默认模式${C_RESET}`);
+    console.log(`    ${T.accent}/conf reset${C_RESET}                      ${T.dim}恢复默认${C_RESET}`);
     console.log();
     return;
   }
 
   const sub = args[0];
   const val = args.slice(1).join(' ');
+
+  if (sub === 'provider') {
+    if (!val) {
+      err('用法: /conf provider <ollama|lmstudio>');
+      dim(`当前: ${PROVIDER}`);
+      console.log();
+      return;
+    }
+    if (!PROVIDERS[val]) {
+      err(`未知 provider: ${val}`);
+      dim(`可选: ${Object.keys(PROVIDERS).join('  ')}`);
+      console.log();
+      return;
+    }
+    switchProvider(val);
+    persistConfig();
+    const p = PROVIDERS[val];
+    ok(`provider → ${p.name}`);
+    dim(`默认 URL 已设为 ${p.defaultUrl}`);
+    console.log();
+    banner();
+    return;
+  }
 
   if (sub === 'model') {
     if (!val) { err('用法: /conf model <名称>'); dim(`当前: ${MODEL}`); console.log(); return; }
@@ -381,8 +479,15 @@ function doConf(args) {
     if (!val) { err('用法: /conf url <地址>'); dim(`当前: ${OLLAMA_URL}`); console.log(); return; }
     if (!/^https?:\/\//.test(val)) { err('URL 必须以 http:// 或 https:// 开头'); console.log(); return; }
     OLLAMA_URL = val;
-    if (persistConfig()) { ok(`url → ${OLLAMA_URL}`); dim('已保存到配置文件'); }
-    else warn(`url → ${OLLAMA_URL}（内存已改，但配置文件保存失败）`);
+    // 自动判断 provider
+    if (/\/v1\/?$/.test(val)) PROVIDER = 'lmstudio';
+    else PROVIDER = 'ollama';
+    if (persistConfig()) {
+      ok(`url → ${OLLAMA_URL}`);
+      dim(`provider 自动识别为 ${PROVIDERS[PROVIDER].name}`);
+    } else {
+      warn(`url → ${OLLAMA_URL}（内存已改，但配置文件保存失败）`);
+    }
     console.log();
     return;
   }
@@ -410,7 +515,8 @@ function doConf(args) {
   if (sub === 'reset') {
     config = {};
     saveConfig(config);
-    OLLAMA_URL = 'http://192.168.1.1:11434';
+    PROVIDER = 'ollama';
+    OLLAMA_URL = PROVIDERS.ollama.defaultUrl;
     MODEL = 'qwen2.5-coder:7b';
     THEME_NAME = 'claude';
     T = THEMES.claude;
@@ -449,10 +555,8 @@ function backup(fp) {
 }
 
 function extractFile(text) {
-  // 只匹配带扩展名的文件名
   let m = text.match(/([\w\-/]+\.(py|txt|json|md|yaml|yml|toml|cfg|ini|js|ts|go|rs|java))/);
   if (m) return m[1];
-  // 明确的写入关键词 + 必须带扩展名
   m = text.match(/(?:写入到|写到|存到|保存到)\s*([\w\-/]+\.[a-z]+)/);
   if (m) return m[1];
   return null;
@@ -640,15 +744,24 @@ function getArgCandidates(buf) {
       .map((n) => ({ cmd: n, desc: MODES[n], isArg: true }));
     return { items, prefix };
   }
+  m = buf.match(/^\/conf\s+provider\s+(\S*)$/);
+  if (m) {
+    const prefix = m[1];
+    const items = Object.keys(PROVIDERS)
+      .filter((n) => n.startsWith(prefix))
+      .map((n) => ({ cmd: n, desc: PROVIDERS[n].name + ' · ' + PROVIDERS[n].hint, isArg: true }));
+    return { items, prefix };
+  }
   m = buf.match(/^\/conf\s+(\S*)$/);
   if (m) {
     const prefix = m[1];
     const subs = [
-      { cmd: 'model', desc: '切换模型' },
-      { cmd: 'url',   desc: 'Ollama 地址' },
-      { cmd: 'theme', desc: '切换主题' },
-      { cmd: 'mode',  desc: '默认模式' },
-      { cmd: 'reset', desc: '恢复默认' },
+      { cmd: 'provider', desc: 'Ollama 或 LM Studio' },
+      { cmd: 'model',    desc: '切换模型' },
+      { cmd: 'url',      desc: '自定义地址' },
+      { cmd: 'theme',    desc: '切换主题' },
+      { cmd: 'mode',     desc: '默认模式' },
+      { cmd: 'reset',    desc: '恢复默认' },
     ];
     const items = subs.filter((s) => s.cmd.startsWith(prefix))
       .map((s) => ({ cmd: s.cmd, desc: s.desc, isArg: true }));
@@ -689,9 +802,9 @@ function readLine(prompt, menu) {
 
     function render() {
       let out = '';
-      if (anchorSaved) out += '\x1b[u';   // 恢复锚点到输入行开头
-      out += '\r\x1b[0J';                  // 清到屏幕末尾
-      out += '\x1b[s';                     // 保存新锚点
+      if (anchorSaved) out += '\x1b[u';
+      out += '\r\x1b[0J';
+      out += '\x1b[s';
       out += prompt + buf;
 
       if (menuVisible) {
@@ -722,14 +835,12 @@ function readLine(prompt, menu) {
             else rows.push(`  ${T.accent}${it.cmd}${C_RESET}${pad}${T.dim}${it.desc}${C_RESET}`);
           }
         }
-
         let maxW = 0;
         for (const r of rows) {
           if (r === '__SEP__') continue;
           maxW = Math.max(maxW, displayWidth(r));
         }
         const innerW = Math.max(maxW + 2, 30);
-
         out += '\n  ' + T.line + '╭' + '─'.repeat(innerW) + '╮' + C_RESET;
         for (const r of rows) {
           out += '\n  ' + T.line + '│' + C_RESET;
@@ -902,12 +1013,13 @@ function helpText() {
   console.log(`    ${T.accent}/yolo${C_RESET}   ${T.dim}自动写入 + 允许运行${C_RESET}`);
   console.log();
   console.log(`  ${C_BOLD}${T.primary}配置${C_RESET}`);
-  console.log(`    ${T.accent}/conf${C_RESET}                ${T.dim}查看当前配置${C_RESET}`);
-  console.log(`    ${T.accent}/conf model${C_RESET} ${T.dim}<名称>${C_RESET}   ${T.dim}切换模型${C_RESET}`);
-  console.log(`    ${T.accent}/conf url${C_RESET}   ${T.dim}<地址>${C_RESET}   ${T.dim}Ollama 地址${C_RESET}`);
-  console.log(`    ${T.accent}/conf theme${C_RESET} ${T.dim}<名称>${C_RESET}   ${T.dim}主题${C_RESET}`);
-  console.log(`    ${T.accent}/conf mode${C_RESET}  ${T.dim}<名称>${C_RESET}   ${T.dim}默认模式${C_RESET}`);
-  console.log(`    ${T.accent}/conf reset${C_RESET}            ${T.dim}恢复默认${C_RESET}`);
+  console.log(`    ${T.accent}/conf${C_RESET}                      ${T.dim}查看当前配置${C_RESET}`);
+  console.log(`    ${T.accent}/conf provider${C_RESET} ${T.dim}<名称>${C_RESET}      ${T.dim}ollama / lmstudio${C_RESET}`);
+  console.log(`    ${T.accent}/conf model${C_RESET}    ${T.dim}<名称>${C_RESET}      ${T.dim}切换模型${C_RESET}`);
+  console.log(`    ${T.accent}/conf url${C_RESET}      ${T.dim}<地址>${C_RESET}      ${T.dim}自定义地址${C_RESET}`);
+  console.log(`    ${T.accent}/conf theme${C_RESET}    ${T.dim}<名称>${C_RESET}      ${T.dim}主题${C_RESET}`);
+  console.log(`    ${T.accent}/conf mode${C_RESET}     ${T.dim}<名称>${C_RESET}      ${T.dim}默认模式${C_RESET}`);
+  console.log(`    ${T.accent}/conf reset${C_RESET}                  ${T.dim}恢复默认${C_RESET}`);
   console.log();
   console.log(`  ${C_BOLD}${T.primary}其他${C_RESET} ${T.dim}/test /mode /root /files /clear /exit${C_RESET}`);
   console.log();
@@ -952,11 +1064,13 @@ async function main() {
     ROOT = process.cwd();
   }
 
-  // 2. 加载配置（从当前工作目录）
+  // 2. 加载配置
   config = loadConfig();
 
-  // 3. 优先级应用：命令行 > 环境变量 > 配置文件 > 默认
-  OLLAMA_URL = process.env.OLLAMA_URL || config.ollama_url || 'http://192.168.1.1:11434';
+  // 3. 应用优先级：命令行 > 环境变量 > 配置文件 > 默认
+  PROVIDER = config.provider || 'ollama';
+  if (!PROVIDERS[PROVIDER]) PROVIDER = 'ollama';
+  OLLAMA_URL = process.env.OLLAMA_URL || config.ollama_url || PROVIDERS[PROVIDER].defaultUrl;
   MODEL = process.env.OLLAMA_MODEL || config.model || 'qwen2.5-coder:7b';
   THEME_NAME = process.env.WHALE_THEME || config.theme || 'claude';
   MODE = config.mode || 'ask';
