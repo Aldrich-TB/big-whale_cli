@@ -33,28 +33,28 @@ function saveConfig(cfg) {
 
 // ── 全局状态 ──────────────────────────────────────
 let config = {};
-let PROVIDER = 'ollama';       // 'ollama' | 'lmstudio'
+let PROVIDER = 'ollama';
 let OLLAMA_URL = 'http://192.168.221.1:11434';
 let MODEL = 'qwen2.5-coder:7b';
 let THEME_NAME = 'claude';
 let MODE = 'ask';
 let LAST_FILE = null;
+let ACTIVE_FILE = null;
 const HISTORY = [];
 
-// provider 默认值
 const PROVIDERS = {
   ollama: {
     name: 'Ollama',
     defaultUrl: 'http://192.168.221.1:11434',
     port: 11434,
-    apiType: 'ollama',   // 原生 API
+    apiType: 'ollama',
     hint: 'URL 末尾不带 /v1',
   },
   lmstudio: {
     name: 'LM Studio',
     defaultUrl: 'http://192.168.221.1:1234/v1',
     port: 1234,
-    apiType: 'openai',   // OpenAI 兼容
+    apiType: 'openai',
     hint: 'URL 末尾带 /v1',
   },
 };
@@ -106,9 +106,15 @@ const MENU = [
     { cmd: '/auto', desc: '直接写入，不确认' },
     { cmd: '/yolo', desc: '自动写入 + 允许运行' },
   ]},
+  { name: '文件', items: [
+    { cmd: '/open',  desc: '锁定一个文件编辑' },
+    { cmd: '/close', desc: '退出文件编辑模式' },
+    { cmd: '/pwd',   desc: '显示当前文件完整路径' },
+  ]},
   { name: '配置', items: [
-    { cmd: '/conf',  desc: '查看/修改配置' },
-    { cmd: '/theme', desc: '切换主题' },
+    { cmd: '/conf',   desc: '查看/修改配置' },
+    { cmd: '/models', desc: '列出并切换模型' },
+    { cmd: '/theme',  desc: '切换主题' },
   ]},
   { name: '查看', items: [
     { cmd: '/files', desc: '列出当前目录文件' },
@@ -162,10 +168,13 @@ function banner() {
   console.log(`  ${T.dim}model${C_RESET}     ${T.user}${MODEL}${C_RESET}`);
   console.log(`  ${T.dim}url${C_RESET}       ${T.user}${OLLAMA_URL}${C_RESET}`);
   console.log(`  ${T.dim}cwd${C_RESET}       ${T.user}${relPath(ROOT)}${C_RESET}  ${T.dim}(locked)${C_RESET}`);
+  if (ACTIVE_FILE) {
+    console.log(`  ${T.dim}file${C_RESET}      ${T.primary}${C_BOLD}${ACTIVE_FILE}${C_RESET}`);
+  }
   console.log(`  ${T.dim}mode${C_RESET}      ${T.primary}${MODE}${C_RESET}  ${T.dim}· ${MODES[MODE]}${C_RESET}`);
   console.log(`  ${T.dim}theme${C_RESET}     ${T.primary}${T.name}${C_RESET}`);
   console.log();
-  console.log(`  ${T.dim}输入 ${C_RESET}${T.primary}/${C_RESET}${T.dim} 弹菜单  ·  ${C_RESET}${T.primary}${T.star}${C_RESET}${T.dim} 直接说话  ·  ${C_RESET}${T.primary}/conf${C_RESET}${T.dim} 配置  ·  ${C_RESET}${T.primary}/test${C_RESET}${T.dim} 测连接${C_RESET}`);
+  console.log(`  ${T.dim}输入 ${C_RESET}${T.primary}/${C_RESET}${T.dim} 弹菜单  ·  ${C_RESET}${T.primary}${T.star}${C_RESET}${T.dim} 直接说话  ·  ${C_RESET}${T.primary}/open${C_RESET}${T.dim} 锁定文件  ·  ${C_RESET}${T.primary}/models${C_RESET}${T.dim} 换模型${C_RESET}`);
   console.log();
   console.log(`  ${T.line}${'─'.repeat(w)}${C_RESET}`);
   console.log();
@@ -217,7 +226,7 @@ function confirm(prompt = '继续?') {
   });
 }
 
-// ── API 类型判断 ──────────────────────────────────
+// ── API 类型 ──────────────────────────────────────
 function detectApiType(url) {
   const p = PROVIDERS[PROVIDER];
   if (p && p.apiType) return p.apiType;
@@ -328,6 +337,7 @@ function checkConnection(timeoutMs = 5000) {
   });
 }
 
+// ── /test ─────────────────────────────────────────
 async function doTest() {
   console.log();
   process.stdout.write(`  ${T.primary}${T.star}${C_RESET} ${T.dim}检测中…${C_RESET}`);
@@ -346,27 +356,18 @@ async function doTest() {
   if (r.ok && r.hasModel) {
     console.log(`  ${T.green}${T.star}${C_RESET} ${C_BOLD}连接正常${C_RESET}  ·  ${T.dim}模型就绪${C_RESET}`);
     console.log();
-    if (r.models.length > 0) {
-      console.log(`  ${T.dim}可用模型 ${r.models.length} 个:${C_RESET}`);
-      for (const m of r.models) {
-        const mark = (m === MODEL || m.startsWith(MODEL + ':')) ? `${T.primary}●${C_RESET}` : ` `;
-        console.log(`    ${mark} ${m}`);
-      }
-      console.log();
-    }
+    console.log(`  ${T.dim}换模型:${C_RESET} ${T.primary}/models${C_RESET}`);
+    console.log();
     return;
   }
   if (r.ok && !r.hasModel) {
-    console.log(`  ${T.yellow}!${C_RESET} ${C_BOLD}服务已连接，但没有目标模型${C_RESET}`);
+    console.log(`  ${T.yellow}!${C_RESET} ${C_BOLD}服务已连接，但目标模型不在列表中${C_RESET}`);
     console.log();
     if (r.models.length > 0) {
-      console.log(`  ${T.dim}可用模型:${C_RESET}`);
-      for (const m of r.models) console.log(`    ${T.dim}·${C_RESET} ${m}`);
+      console.log(`  ${T.dim}可用模型 ${r.models.length} 个，跑 ${T.primary}/models${C_RESET}${T.dim} 选择${C_RESET}`);
     } else {
       console.log(`  ${T.dim}还没有加载任何模型${C_RESET}`);
     }
-    console.log();
-    console.log(`  ${T.dim}改模型:${C_RESET} ${T.primary}/conf model <名称>${C_RESET}`);
     console.log();
     return;
   }
@@ -399,6 +400,239 @@ async function doTest() {
   console.log();
 }
 
+// ── 通用选择器（模型 / 文件） ─────────────────────
+function pickItem(items, currentIdx, title) {
+  return new Promise((resolve) => {
+    let sel = currentIdx >= 0 ? currentIdx : 0;
+    let numBuf = '';
+    let numTimer = null;
+    let lastRenderLines = 0;
+
+    function cleanup() {
+      if (numTimer) clearTimeout(numTimer);
+      process.stdin.removeListener('keypress', onKey);
+      process.stdin.setRawMode(false);
+      process.stdin.pause();
+    }
+
+    function render() {
+      const innerW = Math.max(48, Math.min((process.stdout.columns || 80) - 10, 80));
+      const maxLen = Math.max(...items.map((m) => displayWidth(m)));
+      let out = '';
+      if (lastRenderLines > 0) out += `\x1b[${lastRenderLines}A`;
+      out += '\r\x1b[0J';
+
+      const t = ' ' + title + ' ';
+      const titlePad = ' '.repeat(Math.max(0, innerW - displayWidth(t)));
+      out += '\n  ' + T.line + '╭' + '─'.repeat(innerW) + '╮' + C_RESET;
+      out += '\n  ' + T.line + '│' + C_RESET + T.primary + C_BOLD + t + C_RESET + titlePad + T.line + '│' + C_RESET;
+      out += '\n  ' + T.line + '├' + '─'.repeat(innerW) + '┤' + C_RESET;
+
+      for (let i = 0; i < items.length; i++) {
+        const m = items[i];
+        const isSel = i === sel;
+        const num = String(i + 1).padStart(2, ' ');
+        const pad = ' '.repeat(Math.max(0, maxLen - displayWidth(m)));
+        let row;
+        if (isSel) {
+          row = `${T.primary}${T.dot}${C_RESET} ${T.dim}${num}${C_RESET}  ${C_BOLD}${T.primary}${m}${C_RESET}${pad}`;
+        } else {
+          row = `  ${T.dim}${num}${C_RESET}  ${T.user}${m}${C_RESET}${pad}`;
+        }
+        const w = displayWidth(row);
+        const rightPad = ' '.repeat(Math.max(0, innerW - w - 1));
+        out += '\n  ' + T.line + '│' + C_RESET + ' ' + row + rightPad + T.line + '│' + C_RESET;
+      }
+
+      out += '\n  ' + T.line + '╰' + '─'.repeat(innerW) + '╯' + C_RESET;
+      const hint = numBuf
+        ? `↑↓ 选择  Enter 确认  Esc 取消  ${T.primary}输入: ${numBuf}${C_RESET}`
+        : `↑↓ 选择  Enter 确认  Esc 取消`;
+      out += `\n  ${T.dim}${hint}${C_RESET}`;
+
+      lastRenderLines = items.length + 4;
+      process.stdout.write(out);
+    }
+
+    function finish(result) {
+      let out = '';
+      if (lastRenderLines > 0) out += `\x1b[${lastRenderLines}A`;
+      out += '\r\x1b[0J';
+      process.stdout.write(out);
+      cleanup();
+      resolve(result);
+    }
+
+    function onKey(str, key) {
+      if (key.ctrl && key.name === 'c') return finish(null);
+      if (key.name === 'escape') return finish(null);
+
+      if (key.name === 'return' || key.name === 'enter') {
+        if (numBuf) {
+          const n = parseInt(numBuf, 10);
+          if (n >= 1 && n <= items.length) return finish(items[n - 1]);
+        }
+        return finish(items[sel]);
+      }
+
+      if (key.name === 'up') {
+        sel = (sel - 1 + items.length) % items.length;
+        numBuf = '';
+        render();
+        return;
+      }
+      if (key.name === 'down') {
+        sel = (sel + 1) % items.length;
+        numBuf = '';
+        render();
+        return;
+      }
+
+      if (str && /^[0-9]$/.test(str)) {
+        numBuf += str;
+        const n = parseInt(numBuf, 10);
+        if (n >= 1 && n <= items.length) {
+          sel = n - 1;
+        } else {
+          numBuf = str;
+          const n2 = parseInt(numBuf, 10);
+          if (n2 >= 1 && n2 <= items.length) sel = n2 - 1;
+        }
+        if (numTimer) clearTimeout(numTimer);
+        numTimer = setTimeout(() => { numBuf = ''; render(); }, 1500);
+        render();
+        return;
+      }
+    }
+
+    readline.emitKeypressEvents(process.stdin);
+    process.stdin.resume();
+    process.stdin.setRawMode(true);
+    process.stdin.on('keypress', onKey);
+    render();
+  });
+}
+
+// ── /models ───────────────────────────────────────
+async function doModels() {
+  console.log();
+  process.stdout.write(`  ${T.primary}${T.star}${C_RESET} ${T.dim}获取模型列表…${C_RESET}`);
+  const r = await checkConnection(5000);
+  process.stdout.write('\r' + ' '.repeat(40) + '\r');
+
+  if (!r.ok) {
+    err('无法连接');
+    dim('先跑 /test 排查');
+    console.log();
+    return;
+  }
+
+  if (r.models.length === 0) {
+    warn('没有可用模型');
+    if (PROVIDER === 'ollama') {
+      dim(`下载: ollama pull ${MODEL}`);
+    } else {
+      dim('LM Studio 里加载一个模型再试');
+    }
+    console.log();
+    return;
+  }
+
+  const currentIdx = r.models.findIndex((m) =>
+    m === MODEL || m.startsWith(MODEL + ':') || m === MODEL + ':latest'
+  );
+
+  const picked = await pickItem(r.models, currentIdx, '可用模型');
+  if (!picked) { dim('取消'); console.log(); return; }
+
+  if (picked === MODEL || picked.startsWith(MODEL + ':')) {
+    dim(`已经是 ${picked}`);
+    console.log();
+    return;
+  }
+
+  MODEL = picked;
+  persistConfig();
+  ok(`model → ${MODEL}`);
+  console.log();
+}
+
+// ── 文件编辑模式 ──────────────────────────────────
+async function doOpenFile(args) {
+  console.log();
+  let target = args.join(' ').trim();
+
+  if (!target) {
+    const entries = fs.readdirSync(ROOT).sort().filter((e) => {
+      if (e.startsWith('.')) return false;
+      try { return fs.statSync(path.join(ROOT, e)).isFile(); } catch (e) { return false; }
+    });
+    if (entries.length === 0) {
+      err('当前目录没有文件');
+      console.log();
+      return;
+    }
+    const picked = await pickItem(entries, -1, '选择文件');
+    if (!picked) { dim('取消'); console.log(); return; }
+    ACTIVE_FILE = picked;
+    const full = path.join(ROOT, picked);
+    ok(`已锁定 ${picked}`);
+    dim(`完整路径: ${full}`);
+    console.log();
+    banner();
+    return;
+  }
+
+  const full = safePath(target);
+  if (!full) { err(`路径越界: ${target}`); console.log(); return; }
+  if (!fs.existsSync(full)) {
+    err(`文件不存在: ${relPath(full)}`);
+    dim('可以先用其他编辑器创建，或直接说话让它生成');
+    console.log();
+    return;
+  }
+  if (fs.statSync(full).isDirectory()) {
+    err(`${relPath(full)} 是目录，不是文件`);
+    console.log();
+    return;
+  }
+
+  ACTIVE_FILE = relPath(full);
+  ok(`已锁定 ${ACTIVE_FILE}`);
+  dim(`完整路径: ${full}`);
+  console.log();
+  banner();
+}
+
+function doCloseFile() {
+  console.log();
+  if (!ACTIVE_FILE) {
+    dim('当前没有锁定文件');
+    console.log();
+    return;
+  }
+  const f = ACTIVE_FILE;
+  ACTIVE_FILE = null;
+  ok(`已退出 ${f}`);
+  console.log();
+  banner();
+}
+
+function doPwd() {
+  console.log();
+  if (ACTIVE_FILE) {
+    const full = path.isAbsolute(ACTIVE_FILE)
+      ? ACTIVE_FILE
+      : path.join(ROOT, ACTIVE_FILE);
+    console.log(`  ${T.user}${full}${C_RESET}`);
+    if (!fs.existsSync(full)) dim('（文件尚不存在）');
+  } else {
+    console.log(`  ${T.user}${ROOT}${C_RESET}`);
+    dim('当前未锁定文件，/open <文件> 可锁定一个');
+  }
+  console.log();
+}
+
 function persistConfig() {
   config.provider = PROVIDER;
   config.ollama_url = OLLAMA_URL;
@@ -408,7 +642,6 @@ function persistConfig() {
   return saveConfig(config);
 }
 
-// 切换 provider 时自动套用默认 URL
 function switchProvider(name) {
   const p = PROVIDERS[name];
   PROVIDER = name;
@@ -427,6 +660,7 @@ function doConf(args) {
     console.log(`  ${T.dim}theme${C_RESET}     ${T.primary}${T.name}${C_RESET}`);
     console.log(`  ${T.dim}mode${C_RESET}      ${T.primary}${MODE}${C_RESET}`);
     console.log(`  ${T.dim}root${C_RESET}      ${T.user}${relPath(ROOT)}${C_RESET}`);
+    if (ACTIVE_FILE) console.log(`  ${T.dim}file${C_RESET}      ${T.primary}${ACTIVE_FILE}${C_RESET}`);
     console.log();
     console.log(`  ${T.dim}配置文件${C_RESET}  ${T.accent}${getConfigPath()}${C_RESET}`);
     console.log();
@@ -479,7 +713,6 @@ function doConf(args) {
     if (!val) { err('用法: /conf url <地址>'); dim(`当前: ${OLLAMA_URL}`); console.log(); return; }
     if (!/^https?:\/\//.test(val)) { err('URL 必须以 http:// 或 https:// 开头'); console.log(); return; }
     OLLAMA_URL = val;
-    // 自动判断 provider
     if (/\/v1\/?$/.test(val)) PROVIDER = 'lmstudio';
     else PROVIDER = 'ollama';
     if (persistConfig()) {
@@ -575,10 +808,12 @@ function detectIntent(text) {
     if (isWrite) return 'write';
     return 'read';
   }
-  if (LAST_FILE) {
+  const anchor = ACTIVE_FILE || LAST_FILE;
+  if (anchor) {
     if (isEdit) return 'edit';
     if (isRun) return 'run';
     if (isRead) return 'read';
+    if (isWrite) return 'write';
   }
   if (isLs) return 'ls';
   if (isRun) return 'run';
@@ -622,11 +857,15 @@ function doLs(_) {
   }
   console.log();
   for (const d of dirs) console.log(`  ${T.primary}${T.bullet}${C_RESET} ${T.user}${d}/${C_RESET}`);
-  for (const f of files) console.log(`  ${T.dim}${T.bullet}${C_RESET} ${f}`);
+  for (const f of files) {
+    const isActive = f === ACTIVE_FILE;
+    const mark = isActive ? `${T.primary}●${C_RESET}` : `${T.dim}${T.bullet}${C_RESET}`;
+    console.log(`  ${mark} ${isActive ? T.primary + C_BOLD : ''}${f}${C_RESET}${isActive ? `  ${T.dim}(锁定)${C_RESET}` : ''}`);
+  }
   console.log();
 }
 function doRead(text) {
-  const p = extractFile(text) || LAST_FILE;
+  const p = extractFile(text) || ACTIVE_FILE || LAST_FILE;
   if (!p) { err('看哪个文件？'); return; }
   const full = safePath(p);
   if (!full) { err(`路径越界: ${p}`); return; }
@@ -640,7 +879,7 @@ function doRead(text) {
 }
 async function doRun(text) {
   if (MODE !== 'yolo') { warn(`运行需要 yolo 模式（当前: ${MODE}）。用 /yolo 切换。`); return; }
-  const p = extractFile(text) || LAST_FILE;
+  const p = extractFile(text) || ACTIVE_FILE || LAST_FILE;
   if (!p) { err('跑哪个文件？'); return; }
   const full = safePath(p);
   if (!full) { err(`路径越界: ${p}`); return; }
@@ -656,7 +895,7 @@ async function doRun(text) {
   LAST_FILE = relPath(full);
 }
 async function doWrite(text, action) {
-  let p = extractFile(text) || LAST_FILE;
+  let p = extractFile(text) || ACTIVE_FILE || LAST_FILE;
   if (!p) {
     p = (await readLine(`  ${T.primary}${T.star}${C_RESET} ${T.dim}写到哪个文件？${C_RESET} `, null)).trim();
     if (!p) { dim('取消'); return; }
@@ -847,10 +1086,7 @@ function readLine(prompt, menu) {
       const innerW = Math.max(maxW + 2, 30);
 
       let out = '';
-      // 从上一轮渲染末尾回到输入行首
-      if (lastRenderLines > 0) {
-        out += `\x1b[${lastRenderLines}A`;
-      }
+      if (lastRenderLines > 0) out += `\x1b[${lastRenderLines}A`;
       out += '\r\x1b[0J';
       out += inputText;
 
@@ -872,9 +1108,7 @@ function readLine(prompt, menu) {
         menuLines = rows.length + 2;
       }
 
-      // 从当前光标（输入行末尾）回到输入行首所需的上移行数
       lastRenderLines = (inputLines - 1) + menuLines;
-
       process.stdout.write(out);
     }
 
@@ -1023,6 +1257,12 @@ function helpText() {
   console.log(`    ${T.dim}看下 solution.py${C_RESET}`);
   console.log(`    ${T.dim}跑一下${C_RESET}`);
   console.log();
+  console.log(`  ${C_BOLD}${T.primary}文件编辑模式${C_RESET}`);
+  console.log(`    ${T.accent}/open${C_RESET}  ${T.dim}<文件>${C_RESET}   ${T.dim}锁定文件，之后写入/编辑默认它${C_RESET}`);
+  console.log(`    ${T.accent}/open${C_RESET}          ${T.dim}不带参数则弹出列表选${C_RESET}`);
+  console.log(`    ${T.accent}/close${C_RESET}         ${T.dim}退出文件编辑模式${C_RESET}`);
+  console.log(`    ${T.accent}/pwd${C_RESET}           ${T.dim}显示当前文件完整路径${C_RESET}`);
+  console.log();
   console.log(`  ${C_BOLD}${T.primary}模式${C_RESET}`);
   console.log(`    ${T.accent}/chat${C_RESET}   ${T.dim}纯聊天${C_RESET}`);
   console.log(`    ${T.accent}/sec${C_RESET}    ${T.dim}只显示，绝不写入${C_RESET}`);
@@ -1038,6 +1278,9 @@ function helpText() {
   console.log(`    ${T.accent}/conf theme${C_RESET}    ${T.dim}<名称>${C_RESET}      ${T.dim}主题${C_RESET}`);
   console.log(`    ${T.accent}/conf mode${C_RESET}     ${T.dim}<名称>${C_RESET}      ${T.dim}默认模式${C_RESET}`);
   console.log(`    ${T.accent}/conf reset${C_RESET}                  ${T.dim}恢复默认${C_RESET}`);
+  console.log();
+  console.log(`  ${C_BOLD}${T.primary}模型${C_RESET}`);
+  console.log(`    ${T.accent}/models${C_RESET}                    ${T.dim}列出并交互切换模型${C_RESET}`);
   console.log();
   console.log(`  ${C_BOLD}${T.primary}其他${C_RESET} ${T.dim}/test /mode /root /files /clear /exit${C_RESET}`);
   console.log();
@@ -1071,7 +1314,6 @@ async function main() {
     }
   }
 
-  // 1. 确定工作目录
   if (rootArg) {
     ROOT = path.resolve(rootArg.replace(/^~/, os.homedir()));
     if (!fs.existsSync(ROOT) || !fs.statSync(ROOT).isDirectory()) {
@@ -1082,10 +1324,8 @@ async function main() {
     ROOT = process.cwd();
   }
 
-  // 2. 加载配置
   config = loadConfig();
 
-  // 3. 应用优先级：命令行 > 环境变量 > 配置文件 > 默认
   PROVIDER = config.provider || 'ollama';
   if (!PROVIDERS[PROVIDER]) PROVIDER = 'ollama';
   OLLAMA_URL = process.env.OLLAMA_URL || config.ollama_url || PROVIDERS[PROVIDER].defaultUrl;
@@ -1102,7 +1342,11 @@ async function main() {
 
   while (true) {
     const modeTag = MODE === 'ask' ? `${T.dim}ask${C_RESET}` : `${T.primary}${MODE}${C_RESET}`;
-    const prompt = `  ${T.primary}${C_BOLD}${T.star}${C_RESET} ${modeTag} ${T.primary}${T.bullet}${C_RESET} `;
+    const fileTag = ACTIVE_FILE
+      ? `${T.primary}${C_BOLD}${ACTIVE_FILE}${C_RESET} ${T.dim}·${C_RESET} `
+      : '';
+    const prompt = `  ${T.primary}${C_BOLD}${T.star}${C_RESET} ${fileTag}${modeTag} ${T.primary}${T.bullet}${C_RESET} `;
+
     let text;
     try { text = (await readLine(prompt, MENU)).trim(); }
     catch (e) {
@@ -1114,12 +1358,16 @@ async function main() {
     if (text.startsWith('/')) {
       const spaceIdx = text.indexOf(' ');
       const cmd = spaceIdx > 0 ? text.slice(1, spaceIdx) : text.slice(1);
-      const rest = spaceIdx > 0 ? text.slice(spaceIdx + 1).split(/\s+/) : [];
+      const rest = spaceIdx > 0 ? text.slice(spaceIdx + 1).split(/\s+/).filter(Boolean) : [];
 
       if (cmd in MODES) { MODE = cmd; ok(`模式 → ${cmd}`); dim(MODES[cmd]); continue; }
       if (cmd === 'exit' || cmd === 'quit' || cmd === 'q') break;
       if (cmd === 'help') { helpText(); continue; }
       if (cmd === 'test') { await doTest(); continue; }
+      if (cmd === 'models') { await doModels(); continue; }
+      if (cmd === 'open')  { await doOpenFile(rest); continue; }
+      if (cmd === 'close') { doCloseFile(); continue; }
+      if (cmd === 'pwd')   { doPwd(); continue; }
       if (cmd === 'conf') { doConf(rest); continue; }
       if (cmd === 'theme') {
         if (rest.length === 0) {
