@@ -450,7 +450,7 @@ function pickItem(items, currentIdx, title) {
         : `↑↓ 选择  Enter 确认  Esc 取消`;
       out += `\n  ${T.dim}${hint}${C_RESET}`;
 
-      lastRenderLines = items.length + 4;
+      lastRenderLines = items.length + 5;
       process.stdout.write(out);
     }
 
