@@ -2,6 +2,7 @@
 'use strict';
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const http = require('http');
 const https = require('https');
@@ -448,10 +449,12 @@ function backup(fp) {
 }
 
 function extractFile(text) {
-  let m = text.match(/([\w\-.]+\.(py|txt|json|md|yaml|yml|toml|cfg|ini|js|ts|go|rs|java))/);
+  // 只匹配带扩展名的文件名
+  let m = text.match(/([\w\-/]+\.(py|txt|json|md|yaml|yml|toml|cfg|ini|js|ts|go|rs|java))/);
   if (m) return m[1];
-  m = text.match(/(?:到|写入|写到|存到|保存到|放进)\s*([\w\-./]+)/);
-  if (m) { let n = m[1]; if (!n.includes('.')) n += '.py'; return n; }
+  // 明确的写入关键词 + 必须带扩展名
+  m = text.match(/(?:写入到|写到|存到|保存到)\s*([\w\-/]+\.[a-z]+)/);
+  if (m) return m[1];
   return null;
 }
 function detectIntent(text) {
@@ -661,7 +664,7 @@ function readLine(prompt, menu) {
     let menuVisible = !!menu;
     let flatItems = [];
     let filtering = false;
-    let prevLines = 0;
+    let anchorSaved = false;
 
     function refreshMenu() {
       if (!menu) { menuVisible = false; return; }
@@ -686,10 +689,10 @@ function readLine(prompt, menu) {
 
     function render() {
       let out = '';
-      if (prevLines > 0) out += `\x1b[${prevLines}A`;
-      out += '\r\x1b[J';
+      if (anchorSaved) out += '\x1b[u';   // 恢复锚点到输入行开头
+      out += '\r\x1b[0J';                  // 清到屏幕末尾
+      out += '\x1b[s';                     // 保存新锚点
       out += prompt + buf;
-      let lines = 0;
 
       if (menuVisible) {
         const rows = [];
@@ -719,14 +722,15 @@ function readLine(prompt, menu) {
             else rows.push(`  ${T.accent}${it.cmd}${C_RESET}${pad}${T.dim}${it.desc}${C_RESET}`);
           }
         }
+
         let maxW = 0;
         for (const r of rows) {
           if (r === '__SEP__') continue;
           maxW = Math.max(maxW, displayWidth(r));
         }
         const innerW = Math.max(maxW + 2, 30);
+
         out += '\n  ' + T.line + '╭' + '─'.repeat(innerW) + '╮' + C_RESET;
-        lines++;
         for (const r of rows) {
           out += '\n  ' + T.line + '│' + C_RESET;
           if (r === '__SEP__') {
@@ -737,12 +741,11 @@ function readLine(prompt, menu) {
             out += ' ' + r + rightPad + ' ';
           }
           out += T.line + '│' + C_RESET;
-          lines++;
         }
         out += '\n  ' + T.line + '╰' + '─'.repeat(innerW) + '╯' + C_RESET;
-        lines++;
       }
-      prevLines = lines;
+
+      anchorSaved = true;
       process.stdout.write(out);
     }
 
@@ -752,14 +755,21 @@ function readLine(prompt, menu) {
       process.stdin.pause();
     }
     function finish(fb) {
-      if (prevLines > 0) process.stdout.write(`\x1b[${prevLines}A`);
-      process.stdout.write('\r\x1b[J' + prompt + fb + '\n');
-      prevLines = 0; cleanup(); resolve(fb);
+      let out = '';
+      if (anchorSaved) out += '\x1b[u';
+      out += '\r\x1b[0J';
+      out += prompt + fb + '\n';
+      anchorSaved = false;
+      cleanup();
+      resolve(fb);
     }
     function abort(r) {
-      if (prevLines > 0) process.stdout.write(`\x1b[${prevLines}A`);
-      process.stdout.write('\r\x1b[J\n');
-      prevLines = 0; cleanup(); reject(new Error(r));
+      let out = '';
+      if (anchorSaved) out += '\x1b[u';
+      out += '\r\x1b[0J\n';
+      anchorSaved = false;
+      cleanup();
+      reject(new Error(r));
     }
     function currentItem() {
       if (!menuVisible) return null;
@@ -871,6 +881,7 @@ function readLine(prompt, menu) {
     process.stdin.setRawMode(true);
     process.stdin.on('keypress', onKey);
     process.stdout.write(prompt);
+    anchorSaved = false;
   });
 }
 
@@ -932,7 +943,7 @@ async function main() {
 
   // 1. 确定工作目录
   if (rootArg) {
-    ROOT = path.resolve(rootArg.replace(/^~/, require('os').homedir()));
+    ROOT = path.resolve(rootArg.replace(/^~/, os.homedir()));
     if (!fs.existsSync(ROOT) || !fs.statSync(ROOT).isDirectory()) {
       console.error(`目录不存在 ${ROOT}`); process.exit(1);
     }
