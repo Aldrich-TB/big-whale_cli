@@ -777,7 +777,7 @@ function readLine(prompt, menu) {
     let menuVisible = !!menu;
     let flatItems = [];
     let filtering = false;
-    let anchorSaved = false;
+    let lastRenderLines = 0;
 
     function refreshMenu() {
       if (!menu) { menuVisible = false; return; }
@@ -800,47 +800,62 @@ function readLine(prompt, menu) {
       } else { menuVisible = false; filtering = false; }
     }
 
-    function render() {
-      let out = '';
-      if (anchorSaved) out += '\x1b[u';
-      out += '\r\x1b[0J';
-      out += '\x1b[s';
-      out += prompt + buf;
+    function buildRows() {
+      const rows = [];
+      if (!menuVisible) return rows;
+      if (filtering) {
+        const maxLen = Math.max(...flatItems.map((it) => it.cmd.length));
+        for (let i = 0; i < flatItems.length; i++) {
+          const it = flatItems[i];
+          const pad = ' '.repeat(maxLen - it.cmd.length + 2);
+          if (i === sel) rows.push(`${T.primary}${T.dot}${C_RESET} ${C_BOLD}${it.cmd}${C_RESET}${pad}${T.dim}${it.desc}${C_RESET}`);
+          else rows.push(`  ${T.accent}${it.cmd}${C_RESET}${pad}${T.dim}${it.desc}${C_RESET}`);
+        }
+      } else {
+        const tabParts = [];
+        for (let i = 0; i < menu.length; i++) {
+          const cat = menu[i];
+          if (i === catIdx) tabParts.push(`${T.primary}${C_BOLD}${cat.name}${C_RESET}`);
+          else tabParts.push(`${T.dim}${cat.name}${C_RESET}`);
+        }
+        rows.push(tabParts.join(`  ${T.line}${T.bullet}${C_RESET}  `));
+        rows.push('__SEP__');
+        const items = menu[catIdx].items;
+        const maxLen = Math.max(...items.map((it) => it.cmd.length));
+        for (let i = 0; i < items.length; i++) {
+          const it = items[i];
+          const pad = ' '.repeat(maxLen - it.cmd.length + 2);
+          if (i === sel) rows.push(`${T.primary}${T.dot}${C_RESET} ${C_BOLD}${it.cmd}${C_RESET}${pad}${T.dim}${it.desc}${C_RESET}`);
+          else rows.push(`  ${T.accent}${it.cmd}${C_RESET}${pad}${T.dim}${it.desc}${C_RESET}`);
+        }
+      }
+      return rows;
+    }
 
-      if (menuVisible) {
-        const rows = [];
-        if (filtering) {
-          const maxLen = Math.max(...flatItems.map((it) => it.cmd.length));
-          for (let i = 0; i < flatItems.length; i++) {
-            const it = flatItems[i];
-            const pad = ' '.repeat(maxLen - it.cmd.length + 2);
-            if (i === sel) rows.push(`${T.primary}${T.dot}${C_RESET} ${C_BOLD}${it.cmd}${C_RESET}${pad}${T.dim}${it.desc}${C_RESET}`);
-            else rows.push(`  ${T.accent}${it.cmd}${C_RESET}${pad}${T.dim}${it.desc}${C_RESET}`);
-          }
-        } else {
-          const tabParts = [];
-          for (let i = 0; i < menu.length; i++) {
-            const cat = menu[i];
-            if (i === catIdx) tabParts.push(`${T.primary}${C_BOLD}${cat.name}${C_RESET}`);
-            else tabParts.push(`${T.dim}${cat.name}${C_RESET}`);
-          }
-          rows.push(tabParts.join(`  ${T.line}${T.bullet}${C_RESET}  `));
-          rows.push('__SEP__');
-          const items = menu[catIdx].items;
-          const maxLen = Math.max(...items.map((it) => it.cmd.length));
-          for (let i = 0; i < items.length; i++) {
-            const it = items[i];
-            const pad = ' '.repeat(maxLen - it.cmd.length + 2);
-            if (i === sel) rows.push(`${T.primary}${T.dot}${C_RESET} ${C_BOLD}${it.cmd}${C_RESET}${pad}${T.dim}${it.desc}${C_RESET}`);
-            else rows.push(`  ${T.accent}${it.cmd}${C_RESET}${pad}${T.dim}${it.desc}${C_RESET}`);
-          }
-        }
-        let maxW = 0;
-        for (const r of rows) {
-          if (r === '__SEP__') continue;
-          maxW = Math.max(maxW, displayWidth(r));
-        }
-        const innerW = Math.max(maxW + 2, 30);
+    function render() {
+      const cols = process.stdout.columns || 80;
+      const inputText = prompt + buf;
+      const inputW = displayWidth(inputText);
+      const inputLines = Math.max(1, Math.ceil(inputW / cols));
+
+      const rows = buildRows();
+      let maxW = 0;
+      for (const r of rows) {
+        if (r === '__SEP__') continue;
+        maxW = Math.max(maxW, displayWidth(r));
+      }
+      const innerW = Math.max(maxW + 2, 30);
+
+      let out = '';
+      // 从上一轮渲染末尾回到输入行首
+      if (lastRenderLines > 0) {
+        out += `\x1b[${lastRenderLines}A`;
+      }
+      out += '\r\x1b[0J';
+      out += inputText;
+
+      let menuLines = 0;
+      if (rows.length > 0) {
         out += '\n  ' + T.line + '╭' + '─'.repeat(innerW) + '╮' + C_RESET;
         for (const r of rows) {
           out += '\n  ' + T.line + '│' + C_RESET;
@@ -854,9 +869,12 @@ function readLine(prompt, menu) {
           out += T.line + '│' + C_RESET;
         }
         out += '\n  ' + T.line + '╰' + '─'.repeat(innerW) + '╯' + C_RESET;
+        menuLines = rows.length + 2;
       }
 
-      anchorSaved = true;
+      // 从当前光标（输入行末尾）回到输入行首所需的上移行数
+      lastRenderLines = (inputLines - 1) + menuLines;
+
       process.stdout.write(out);
     }
 
@@ -867,18 +885,18 @@ function readLine(prompt, menu) {
     }
     function finish(fb) {
       let out = '';
-      if (anchorSaved) out += '\x1b[u';
+      if (lastRenderLines > 0) out += `\x1b[${lastRenderLines}A`;
       out += '\r\x1b[0J';
       out += prompt + fb + '\n';
-      anchorSaved = false;
+      lastRenderLines = 0;
       cleanup();
       resolve(fb);
     }
     function abort(r) {
       let out = '';
-      if (anchorSaved) out += '\x1b[u';
+      if (lastRenderLines > 0) out += `\x1b[${lastRenderLines}A`;
       out += '\r\x1b[0J\n';
-      anchorSaved = false;
+      lastRenderLines = 0;
       cleanup();
       reject(new Error(r));
     }
@@ -992,7 +1010,7 @@ function readLine(prompt, menu) {
     process.stdin.setRawMode(true);
     process.stdin.on('keypress', onKey);
     process.stdout.write(prompt);
-    anchorSaved = false;
+    lastRenderLines = 0;
   });
 }
 
